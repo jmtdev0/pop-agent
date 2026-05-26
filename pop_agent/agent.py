@@ -389,11 +389,33 @@ def discovered_node_scripts(workdir: Path) -> list[str]:
     return [name for name in ["lint", "test", "build"] if name in scripts]
 
 
+def project_files(workdir: Path) -> list[str]:
+    result = run_command(["git", "ls-files"], cwd=workdir, check=False)
+    if result.returncode == 0:
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    ignored_roots = {".git", "node_modules", "dist", "build", ".venv", "venv"}
+    files: list[str] = []
+    for path in workdir.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(workdir).as_posix()
+        if any(part in ignored_roots for part in rel.split("/")):
+            continue
+        files.append(rel)
+    return files
+
+
+def is_python_test_file(rel_path: str) -> bool:
+    parts = rel_path.split("/")
+    name = parts[-1]
+    if not name.endswith(".py"):
+        return False
+    return "tests" in parts[:-1] or name.startswith("test_") or name.endswith("_test.py")
+
+
 def python_checks_discovered(workdir: Path) -> bool:
-    config_names = ["pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"]
-    if any((workdir / name).exists() for name in config_names):
-        return True
-    return (workdir / "tests").is_dir()
+    return any(is_python_test_file(rel_path) for rel_path in project_files(workdir))
 
 
 def run_check(

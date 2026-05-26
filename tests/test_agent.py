@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from pop_agent.agent import (
     State,
@@ -6,6 +8,7 @@ from pop_agent.agent import (
     clean_pop_marker,
     extract_response_markers,
     has_pop_marker,
+    python_checks_discovered,
 )
 
 
@@ -64,6 +67,24 @@ class DiscoveryTests(unittest.TestCase):
         body = "<!-- pop-agent:source-comment-id=123 -->\nDone with this `#pop`."
         self.assertTrue(has_pop_marker(body))
         self.assertEqual(extract_response_markers([{"body": body}]), {123})
+
+
+class PythonCheckDiscoveryTests(unittest.TestCase):
+    def test_ignores_non_python_tests_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tests").mkdir()
+            (root / "tests" / "app.spec.ts").write_text("test('works')\n", encoding="utf-8")
+
+            self.assertFalse(python_checks_discovered(root))
+
+    def test_detects_python_test_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tests").mkdir()
+            (root / "tests" / "test_app.py").write_text("def test_works():\n    assert True\n", encoding="utf-8")
+
+            self.assertTrue(python_checks_discovered(root))
 
 
 if __name__ == "__main__":
