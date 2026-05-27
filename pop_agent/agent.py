@@ -666,12 +666,12 @@ def netlify_status_via_api(task: Task, sha: str, wait_sec: int, *, logger: RunLo
 
     site = find_netlify_site(task, token=token, logger=logger)
     if not site:
-        return None
+        return "not configured"
 
     site_id = str(site.get("id") or site.get("site_id") or "")
     if not site_id:
         logger.write("netlify matched site without id")
-        return None
+        return "not configured"
 
     deadline = time.monotonic() + wait_sec
     trigger_delay = int(os.environ.get("POP_AGENT_NETLIFY_TRIGGER_DELAY_SEC", DEFAULT_NETLIFY_TRIGGER_DELAY_SEC))
@@ -702,7 +702,11 @@ def netlify_status_via_api(task: Task, sha: str, wait_sec: int, *, logger: RunLo
 
 
 def netlify_status(task: Task, sha: str, wait_sec: int, *, logger: RunLogger) -> str:
-    api_status = netlify_status_via_api(task, sha, wait_sec, logger=logger)
+    try:
+        api_status = netlify_status_via_api(task, sha, wait_sec, logger=logger)
+    except Exception as exc:
+        logger.write(f"netlify api status lookup failed: {exc}")
+        api_status = None
     if api_status is not None:
         return api_status
 

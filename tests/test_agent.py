@@ -1,8 +1,11 @@
+import os
 import unittest
 import tempfile
+from unittest import mock
 from pathlib import Path
 
 from pop_agent.agent import (
+    RunLogger,
     State,
     Task,
     clean_pop_marker,
@@ -10,6 +13,7 @@ from pop_agent.agent import (
     describe_netlify_deploy,
     extract_response_markers,
     has_pop_marker,
+    netlify_status_via_api,
     netlify_site_matches,
     python_checks_discovered,
 )
@@ -137,6 +141,17 @@ class NetlifyTests(unittest.TestCase):
         }
 
         self.assertEqual(describe_netlify_deploy(deploy), "ready: https://deploy.example")
+
+    def test_netlify_api_reports_unconfigured_when_site_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger_path = Path(tmp) / "run.log"
+
+            with mock.patch.dict(os.environ, {"NETLIFY_AUTH_TOKEN": "token"}, clear=False):
+                with mock.patch("pop_agent.agent.find_netlify_site", return_value=None):
+                    self.assertEqual(
+                        netlify_status_via_api(self.task(), "abc123", 600, logger=RunLogger(logger_path)),
+                        "not configured",
+                    )
 
 
 if __name__ == "__main__":
