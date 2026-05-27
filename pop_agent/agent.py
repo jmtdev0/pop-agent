@@ -12,6 +12,8 @@ import sys
 import tempfile
 import textwrap
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,8 @@ DEFAULT_CODEX_EFFORT = "high"
 DEFAULT_CODEX_TIMEOUT_SEC = 3600
 DEFAULT_CHECK_TIMEOUT_SEC = 900
 DEFAULT_NETLIFY_WAIT_SEC = 600
+DEFAULT_NETLIFY_API_BASE = "https://api.netlify.com/api/v1"
+DEFAULT_NETLIFY_TRIGGER_DELAY_SEC = 30
 
 
 class AgentError(RuntimeError):
@@ -545,7 +549,163 @@ def checks_ok(results: list[CheckResult]) -> bool:
     return all(result.ok for result in results)
 
 
+def netlify_api_request(
+    method: str,
+    path: str,
+    *,
+    token: str,
+    data: dict[str, Any] | None = None,
+    logger: RunLogger,
+) -> Any:
+    base = os.environ.get("POP_AGENT_NETLIFY_API_BASE", DEFAULT_NETLIFY_API_BASE).rstrip("/")
+    url = f"{base}/{path.lstrip('/')}"
+    payload = json.dumps(data or {}).encode("utf-8") if data is not None else None
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "pop-agent",
+        },
+    )
+    logger.write(f"$ netlify api {method} {path}")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise AgentError(f"Netlify API {method} {path} failed ({exc.code}): {body[:500]}") from exc
+    if not body.strip():
+        return None
+    return json.loads(body)
+
+
+def paginated_netlify_api(path: str, *, token: str, logger: RunLogger) -> list[Any]:
+    items: list[Any] = []
+    separator = "&" if "?" in path else "?"
+    for page in range(1, 21):
+        page_path = f"{path}{separator}page={page}&per_page=100"
+        data = netlify_api_request("GET", page_path, token=token, logger=logger)
+        if not isinstance(data, list):
+            return items
+        items.extend(data)
+        if len(data) < 100:
+            return items
+    return items
+
+
+def netlify_site_matches(task: Task, site: dict[str, Any]) -> bool:
+    settings = site.get("build_settings") or {}
+    repo_path = settings.get("repo_path")
+    repo_url = settings.get("repo_url") or ""
+    repo_branch = settings.get("repo_branch")
+    normalized_url = repo_url.removesuffix(".git").removeprefix("https://github.com/").removeprefix("git@github.com:")
+    return (repo_path == task.repo or normalized_url == task.repo) and repo_branch in {None, "", task.default_branch}
+
+
+def find_netlify_site(task: Task, *, token: str, logger: RunLogger) -> dict[str, Any] | None:
+    sites = paginated_netlify_api("/sites", token=token, logger=logger)
+    for site in sites:
+        if isinstance(site, dict) and netlify_site_matches(task, site):
+            logger.write(f"netlify site matched: {site.get('name')} ({site.get('id')})")
+            return site
+    logger.write(f"netlify site not found for {task.repo} branch {task.default_branch}")
+    return None
+
+
+def deploy_matches_sha(deploy: dict[str, Any], sha: str) -> bool:
+    commit_ref = str(deploy.get("commit_ref") or "")
+    commit_url = str(deploy.get("commit_url") or "")
+    return commit_ref == sha or commit_url.rstrip("/").endswith(sha)
+
+
+def find_netlify_deploy(site_id: str, sha: str, *, token: str, logger: RunLogger) -> dict[str, Any] | None:
+    deploys = paginated_netlify_api(f"/sites/{site_id}/deploys", token=token, logger=logger)
+    for deploy in deploys:
+        if isinstance(deploy, dict) and deploy_matches_sha(deploy, sha):
+            logger.write(f"netlify deploy matched: {deploy.get('id')} state={deploy.get('state')}")
+            return deploy
+    return None
+
+
+def trigger_netlify_build(site_id: str, *, token: str, logger: RunLogger) -> None:
+    netlify_api_request("POST", f"/sites/{site_id}/builds", token=token, data={}, logger=logger)
+    logger.write(f"netlify build triggered for site {site_id}")
+
+
+def netlify_deploy_url(deploy: dict[str, Any]) -> str:
+    links = deploy.get("links") or {}
+    for key in ["permalink", "alias"]:
+        value = links.get(key)
+        if value:
+            return str(value)
+    for key in ["deploy_ssl_url", "ssl_url", "deploy_url", "admin_url"]:
+        value = deploy.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def describe_netlify_deploy(deploy: dict[str, Any]) -> str:
+    state = str(deploy.get("state") or "unknown")
+    url = netlify_deploy_url(deploy)
+    return f"{state}: {url}" if url else state
+
+
+def terminal_netlify_state(deploy: dict[str, Any]) -> bool:
+    return str(deploy.get("state") or "").lower() in {"ready", "error", "failed", "canceled"}
+
+
+def netlify_status_via_api(task: Task, sha: str, wait_sec: int, *, logger: RunLogger) -> str | None:
+    token = os.environ.get("NETLIFY_AUTH_TOKEN")
+    if not token:
+        logger.write("netlify api token not configured")
+        return None
+
+    site = find_netlify_site(task, token=token, logger=logger)
+    if not site:
+        return None
+
+    site_id = str(site.get("id") or site.get("site_id") or "")
+    if not site_id:
+        logger.write("netlify matched site without id")
+        return None
+
+    deadline = time.monotonic() + wait_sec
+    trigger_delay = int(os.environ.get("POP_AGENT_NETLIFY_TRIGGER_DELAY_SEC", DEFAULT_NETLIFY_TRIGGER_DELAY_SEC))
+    trigger_after = time.monotonic() + trigger_delay
+    triggered = False
+    last = "not detected"
+
+    while True:
+        deploy = find_netlify_deploy(site_id, sha, token=token, logger=logger)
+        if deploy:
+            last = describe_netlify_deploy(deploy)
+            if terminal_netlify_state(deploy):
+                return last
+
+        if not triggered and time.monotonic() >= trigger_after:
+            try:
+                trigger_netlify_build(site_id, token=token, logger=logger)
+                triggered = True
+                last = "build triggered"
+            except Exception as exc:
+                logger.write(f"netlify build trigger failed: {exc}")
+                triggered = True
+                last = f"trigger failed: {exc}"
+
+        if time.monotonic() >= deadline:
+            return last
+        time.sleep(20)
+
+
 def netlify_status(task: Task, sha: str, wait_sec: int, *, logger: RunLogger) -> str:
+    api_status = netlify_status_via_api(task, sha, wait_sec, logger=logger)
+    if api_status is not None:
+        return api_status
+
     deadline = time.monotonic() + wait_sec
     last = "not detected"
     while True:

@@ -26,9 +26,20 @@ The agent stores runtime state on the server. Do not commit credentials here.
 - `node`/`npm` for JavaScript repositories
 - `python3` for Python repositories
 
-Netlify CLI is not required. Netlify deploys are expected to be triggered by
-GitHub auto-deploy integrations. The agent only looks for Netlify checks/statuses
-after a push and reports what it finds.
+Netlify CLI is not required. To let the agent trigger and verify Netlify deploys
+directly, store a token outside this repository:
+
+```bash
+sudo install -d -m 700 /etc/pop-agent
+sudoedit /etc/pop-agent/pop-agent.env
+```
+
+```bash
+NETLIFY_AUTH_TOKEN=...
+```
+
+The systemd service loads this optional file. If no token is configured, the
+agent falls back to GitHub checks/statuses.
 
 ## Manual usage
 
@@ -46,4 +57,5 @@ python -m pop_agent run --max-tasks 1
 - During the Codex step, GitHub credentials are hidden from `gh`, and Git SSH
   network operations are disabled. The orchestrator performs comments and pushes.
 - If discovered checks fail, the agent does not push.
-
+- Netlify credentials are read from `/etc/pop-agent/pop-agent.env`; never commit
+  them to this repository.

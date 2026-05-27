@@ -8,6 +8,6 @@ Type=oneshot
 WorkingDirectory=/opt/pop-agent
 Environment=HOME=/root
 Environment=PATH=/opt/pop-agent/.venv/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/etc/pop-agent/pop-agent.env
 ExecStart=/usr/bin/flock -n /var/lib/pop-agent/pop-agent.lock /opt/pop-agent/.venv/bin/python -m pop_agent run --owner jmtdev0 --max-tasks 3
 TimeoutStartSec=7200
-

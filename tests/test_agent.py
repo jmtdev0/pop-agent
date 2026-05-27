@@ -6,8 +6,11 @@ from pop_agent.agent import (
     State,
     Task,
     clean_pop_marker,
+    deploy_matches_sha,
+    describe_netlify_deploy,
     extract_response_markers,
     has_pop_marker,
+    netlify_site_matches,
     python_checks_discovered,
 )
 
@@ -85,6 +88,55 @@ class PythonCheckDiscoveryTests(unittest.TestCase):
             (root / "tests" / "test_app.py").write_text("def test_works():\n    assert True\n", encoding="utf-8")
 
             self.assertTrue(python_checks_discovered(root))
+
+
+class NetlifyTests(unittest.TestCase):
+    def task(self):
+        return Task(
+            repo="jmtdev0/example",
+            default_branch="main",
+            ssh_url="git@github.com:jmtdev0/example.git",
+            issue_number=1,
+            issue_title="Issue",
+            comment_id=42,
+            comment_url="https://example.invalid",
+            comment_created_at="2026-01-01T00:00:00Z",
+            comment_updated_at="2026-01-01T00:00:00Z",
+            body="Implement X\n\n#pop",
+        )
+
+    def test_netlify_site_matches_repo_and_branch(self):
+        site = {
+            "build_settings": {
+                "repo_path": "jmtdev0/example",
+                "repo_branch": "main",
+            }
+        }
+
+        self.assertTrue(netlify_site_matches(self.task(), site))
+
+    def test_netlify_site_rejects_wrong_branch(self):
+        site = {
+            "build_settings": {
+                "repo_path": "jmtdev0/example",
+                "repo_branch": "develop",
+            }
+        }
+
+        self.assertFalse(netlify_site_matches(self.task(), site))
+
+    def test_deploy_matches_commit_sha(self):
+        sha = "abc123def456"
+        self.assertTrue(deploy_matches_sha({"commit_ref": sha}, sha))
+        self.assertTrue(deploy_matches_sha({"commit_url": f"https://github.com/x/y/commit/{sha}"}, sha))
+
+    def test_describes_netlify_deploy(self):
+        deploy = {
+            "state": "ready",
+            "links": {"permalink": "https://deploy.example"},
+        }
+
+        self.assertEqual(describe_netlify_deploy(deploy), "ready: https://deploy.example")
 
 
 if __name__ == "__main__":
