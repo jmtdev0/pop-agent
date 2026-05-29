@@ -28,11 +28,21 @@ DEFAULT_WORK_DIR = Path("/var/lib/pop-agent/work")
 DEFAULT_LOG_DIR = Path("/var/log/pop-agent")
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_EFFORT = "high"
+DEFAULT_CODEX_SANDBOX = "workspace-write"
+DEFAULT_CODEX_NETWORK_ACCESS = True
 DEFAULT_CODEX_TIMEOUT_SEC = 3600
 DEFAULT_CHECK_TIMEOUT_SEC = 900
 DEFAULT_NETLIFY_WAIT_SEC = 600
 DEFAULT_NETLIFY_API_BASE = "https://api.netlify.com/api/v1"
 DEFAULT_NETLIFY_TRIGGER_DELAY_SEC = 30
+CODEX_SECRET_ENV_NAMES = {
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_PAT",
+    "NETLIFY_AUTH_TOKEN",
+    "NPM_TOKEN",
+    "SSH_AUTH_SOCK",
+}
 
 
 class AgentError(RuntimeError):
@@ -137,6 +147,13 @@ def sh_quote(value: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9_./:=@%+-]+", value):
         return value
     return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def run_command(
@@ -331,20 +348,7 @@ def codex_prompt(task: Task) -> str:
     ).strip()
 
 
-def run_codex(task: Task, workdir: Path, runtime_dir: Path, args: argparse.Namespace, *, logger: RunLogger) -> Path:
-    prompt = codex_prompt(task)
-    output_file = runtime_dir / "codex_outputs" / f"{task.comment_id}.md"
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    empty_gh_config = runtime_dir / "empty-gh-config"
-    empty_gh_config.mkdir(parents=True, exist_ok=True)
-
-    env = dict(os.environ)
-    env["GH_CONFIG_DIR"] = str(empty_gh_config)
-    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o IdentitiesOnly=yes -i /var/lib/pop-agent/no-such-key"
-    env["HOME"] = os.environ.get("HOME", "/root")
-    env["LANG"] = os.environ.get("LANG", "en_US.UTF-8")
-    env["PYTHONIOENCODING"] = "utf-8"
-
+def codex_command(args: argparse.Namespace, output_file: Path) -> list[str]:
     cmd = [
         args.codex_cli,
         "--ask-for-approval",
@@ -355,11 +359,40 @@ def run_codex(task: Task, workdir: Path, runtime_dir: Path, args: argparse.Names
         "-c",
         f'model_reasoning_effort="{args.codex_effort}"',
         "--sandbox",
-        "workspace-write",
+        args.codex_sandbox,
         "--output-last-message",
         str(output_file),
         "-",
     ]
+    if args.codex_network_access and args.codex_sandbox == "workspace-write":
+        cmd[cmd.index("--sandbox"):cmd.index("--sandbox")] = [
+            "-c",
+            "sandbox_workspace_write.network_access=true",
+        ]
+    return cmd
+
+
+def codex_environment(runtime_dir: Path) -> dict[str, str]:
+    empty_gh_config = runtime_dir / "empty-gh-config"
+    empty_gh_config.mkdir(parents=True, exist_ok=True)
+
+    env = dict(os.environ)
+    for name in CODEX_SECRET_ENV_NAMES:
+        env.pop(name, None)
+    env["GH_CONFIG_DIR"] = str(empty_gh_config)
+    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o IdentitiesOnly=yes -i /var/lib/pop-agent/no-such-key"
+    env["HOME"] = os.environ.get("HOME", "/root")
+    env["LANG"] = os.environ.get("LANG", "en_US.UTF-8")
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def run_codex(task: Task, workdir: Path, runtime_dir: Path, args: argparse.Namespace, *, logger: RunLogger) -> Path:
+    prompt = codex_prompt(task)
+    output_file = runtime_dir / "codex_outputs" / f"{task.comment_id}.md"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    env = codex_environment(runtime_dir)
+    cmd = codex_command(args, output_file)
     run_command(cmd, cwd=workdir, env=env, input_text=prompt, timeout=args.codex_timeout, logger=logger)
     return output_file
 
@@ -892,6 +925,16 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--codex-cli", default=os.environ.get("POP_AGENT_CODEX_CLI", "codex"))
     run_parser.add_argument("--codex-model", default=os.environ.get("POP_AGENT_CODEX_MODEL", DEFAULT_CODEX_MODEL))
     run_parser.add_argument("--codex-effort", default=os.environ.get("POP_AGENT_CODEX_EFFORT", DEFAULT_CODEX_EFFORT))
+    run_parser.add_argument(
+        "--codex-sandbox",
+        choices=["read-only", "workspace-write", "danger-full-access"],
+        default=os.environ.get("POP_AGENT_CODEX_SANDBOX", DEFAULT_CODEX_SANDBOX),
+    )
+    run_parser.add_argument(
+        "--codex-network-access",
+        action=argparse.BooleanOptionalAction,
+        default=env_flag("POP_AGENT_CODEX_NETWORK_ACCESS", DEFAULT_CODEX_NETWORK_ACCESS),
+    )
     run_parser.add_argument("--codex-timeout", type=int, default=int(os.environ.get("POP_AGENT_CODEX_TIMEOUT_SEC", DEFAULT_CODEX_TIMEOUT_SEC)))
     run_parser.add_argument("--check-timeout", type=int, default=int(os.environ.get("POP_AGENT_CHECK_TIMEOUT_SEC", DEFAULT_CHECK_TIMEOUT_SEC)))
     run_parser.add_argument("--netlify-wait", type=int, default=int(os.environ.get("POP_AGENT_NETLIFY_WAIT_SEC", DEFAULT_NETLIFY_WAIT_SEC)))

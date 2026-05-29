@@ -8,7 +8,10 @@ from pop_agent.agent import (
     RunLogger,
     State,
     Task,
+    build_parser,
     clean_pop_marker,
+    codex_command,
+    codex_environment,
     deploy_matches_sha,
     describe_netlify_deploy,
     extract_response_markers,
@@ -74,6 +77,41 @@ class DiscoveryTests(unittest.TestCase):
         body = "<!-- pop-agent:source-comment-id=123 -->\nDone with this `#pop`."
         self.assertTrue(has_pop_marker(body))
         self.assertEqual(extract_response_markers([{"body": body}]), {123})
+
+
+class CodexInvocationTests(unittest.TestCase):
+    def test_workspace_write_enables_network_by_default(self):
+        args = build_parser().parse_args(["run"])
+
+        command = codex_command(args, Path("/tmp/last-message.md"))
+
+        self.assertIn("sandbox_workspace_write.network_access=true", command)
+        self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+
+    def test_can_disable_codex_network_access(self):
+        args = build_parser().parse_args(["run", "--no-codex-network-access"])
+
+        command = codex_command(args, Path("/tmp/last-message.md"))
+
+        self.assertNotIn("sandbox_workspace_write.network_access=true", command)
+
+    def test_codex_environment_strips_orchestrator_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GH_TOKEN": "gh-secret",
+                    "NETLIFY_AUTH_TOKEN": "netlify-secret",
+                    "NPM_TOKEN": "npm-secret",
+                },
+                clear=False,
+            ):
+                env = codex_environment(Path(tmp))
+
+        self.assertNotIn("GH_TOKEN", env)
+        self.assertNotIn("NETLIFY_AUTH_TOKEN", env)
+        self.assertNotIn("NPM_TOKEN", env)
+        self.assertIn("GH_CONFIG_DIR", env)
 
 
 class PythonCheckDiscoveryTests(unittest.TestCase):

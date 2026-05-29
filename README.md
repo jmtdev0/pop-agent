@@ -48,14 +48,24 @@ python -m pop_agent run --dry-run
 python -m pop_agent run --max-tasks 1
 ```
 
+Codex runs with `workspace-write` sandboxing and network access enabled by
+default, so it can fetch public issue assets and install/check dependencies:
+
+```bash
+POP_AGENT_CODEX_NETWORK_ACCESS=0 python -m pop_agent run
+python -m pop_agent run --no-codex-network-access
+```
+
 ## Safety model
 
 - Only comments authored by `jmtdev0` are considered.
 - Each `comment_id` is processed once.
 - Failed tasks are not retried; write a new `#pop` comment to try again.
-- Codex is allowed to edit only the cloned target workspace.
-- During the Codex step, GitHub credentials are hidden from `gh`, and Git SSH
-  network operations are disabled. The orchestrator performs comments and pushes.
+- Codex is allowed to edit only the cloned target workspace, with outbound
+  network access enabled for public assets and dependency/test commands.
+- During the Codex step, GitHub and Netlify credentials are stripped from the
+  environment, `gh` uses an empty config directory, and Git SSH operations use a
+  non-existent key. The orchestrator performs comments, pushes, and deploys.
 - If discovered checks fail, the agent does not push.
 - Netlify credentials are read from `/etc/pop-agent/pop-agent.env`; never commit
   them to this repository.
